@@ -1554,6 +1554,23 @@
     line-height: 1;
   }
 
+  /* ===== TIME FORMAT TOGGLE ===== */
+  .time-toggle {
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    color: var(--pw-white);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    padding: 8px 12px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .time-toggle:hover { background: rgba(255, 255, 255, 0.14); border-color: var(--pw-yellow); }
+  .time-toggle[aria-pressed="true"] { background: var(--pw-yellow); color: var(--pw-black); border-color: var(--pw-yellow); }
+
   /* ===== GLOBAL SEARCH ===== */
   .global-search {
     position: relative;
@@ -1813,6 +1830,7 @@
       <input id="globalSearch" type="search" placeholder="Search events, partners, tasks…" autocomplete="off" spellcheck="false" />
       <span class="gs-hint"><span class="kbd">⌘</span><span class="kbd">K</span></span>
     </div>
+    <button class="time-toggle" id="timeFormatToggle" title="Toggle 12h / 24h time format">12h</button>
     <button class="submitter-chip" id="submitterChip" title="Click to change your name">
       <span class="avatar" id="submitterAvatar">?</span>
       <span class="who-label">Submitting as</span>
@@ -2323,6 +2341,57 @@ function subscribeSettings() {
 const uid = () => 'e_' + Math.random().toString(36).slice(2, 9);
 const fmt$ = n => '$' + (Number(n)||0).toLocaleString();
 const fmtDate = d => d ? new Date(d + 'T00:00').toLocaleDateString('en-US', {month:'short', day:'numeric', year:'numeric'}) : '—';
+
+/* ---------- Time format (personal preference, default 12-hour) ---------- */
+const TIME_FORMAT_KEY = 'pw_time_format';
+function getTimeFormat() {
+  try { return localStorage.getItem(TIME_FORMAT_KEY) === '24' ? '24' : '12'; }
+  catch (e) { return '12'; }
+}
+function setTimeFormat(fmt) {
+  try { localStorage.setItem(TIME_FORMAT_KEY, fmt === '24' ? '24' : '12'); } catch (e) {}
+  if (typeof render === 'function') render();
+  // Update the toggle UI immediately too
+  updateTimeFormatToggle();
+}
+function fmtTime(t) {
+  if (!t) return '';
+  const s = String(t).trim();
+  // Accept "HH:MM" or "HH:MM:SS" or "H:MM AM/PM" already formatted
+  const ampmMatch = s.match(/^(\d{1,2}):?(\d{2})\s*(AM|PM)$/i);
+  if (ampmMatch) {
+    // Already in 12-hour format — convert to user's preference
+    let h = parseInt(ampmMatch[1], 10);
+    const m = parseInt(ampmMatch[2], 10);
+    const isPm = ampmMatch[3].toUpperCase() === 'PM';
+    if (isPm && h !== 12) h += 12;
+    if (!isPm && h === 12) h = 0;
+    return formatHourMinute(h, m);
+  }
+  const m24 = s.match(/^(\d{1,2}):(\d{2})/);
+  if (!m24) return s;
+  const h = parseInt(m24[1], 10);
+  const m = parseInt(m24[2], 10);
+  if (Number.isNaN(h) || Number.isNaN(m)) return s;
+  return formatHourMinute(h, m);
+}
+function formatHourMinute(h, m) {
+  const pad = (n) => String(n).padStart(2, '0');
+  if (getTimeFormat() === '24') return `${pad(h)}:${pad(m)}`;
+  const period = h >= 12 ? 'PM' : 'AM';
+  const h12 = h % 12 || 12;
+  return `${h12}:${pad(m)} ${period}`;
+}
+function updateTimeFormatToggle() {
+  const btn = document.getElementById('timeFormatToggle');
+  if (!btn) return;
+  const fmt = getTimeFormat();
+  btn.textContent = fmt === '24' ? '24h' : '12h';
+  btn.setAttribute('aria-pressed', fmt === '24');
+  btn.title = fmt === '24'
+    ? 'Times shown in 24-hour format (military). Click to switch to 12-hour.'
+    : 'Times shown in 12-hour format (AM/PM). Click to switch to 24-hour.';
+}
 // Only sum the 6 canonical budget categories. Defensive against:
 //   - strings that look like numbers ("500") — parsed via Number()
 //   - NaN / Infinity / null / undefined — coerced to 0
@@ -2922,8 +2991,8 @@ function renderCalendarView() {
           <div class="cal-day ${!c.inMonth?'dim':''} ${c.isToday?'today':''} ${c.weekend?'weekend':''}" data-iso="${c.iso}">
             <span class="cal-date">${c.d.getDate()}</span>
             ${c.dayEvents.slice(0, eventsPerCell).map(e => `
-              <div class="cal-event ${e.status}" data-open="${e.id}" title="${escapeHtml(e.name)} · ${e.status}${e.time?(' · ' + e.time):''}">
-                ${e.time ? `<span class="cal-event-time">${escapeHtml(e.time)}</span>` : ''}${escapeHtml(e.name)}
+              <div class="cal-event ${e.status}" data-open="${e.id}" title="${escapeHtml(e.name)} · ${e.status}${e.time?(' · ' + fmtTime(e.time)):''}">
+                ${e.time ? `<span class="cal-event-time">${escapeHtml(fmtTime(e.time))}</span>` : ''}${escapeHtml(e.name)}
               </div>
             `).join('')}
             ${c.dayEvents.length > eventsPerCell ? `<div class="cal-more" data-day-expand="${c.iso}">+ ${c.dayEvents.length - eventsPerCell} more</div>` : ''}
@@ -2984,7 +3053,7 @@ function openDayPopover(iso, dayEvents) {
       ${dayEvents.map(e => `
         <div class="cal-event ${e.status}" data-popover-open="${e.id}">
           <strong>${escapeHtml(e.name)}</strong>
-          <div>${e.time ? e.time + ' · ' : ''}${escapeHtml(e.type||'')}${e.location ? ' · ' + escapeHtml(e.location) : ''}</div>
+          <div>${e.time ? escapeHtml(fmtTime(e.time)) + ' · ' : ''}${escapeHtml(e.type||'')}${e.location ? ' · ' + escapeHtml(e.location) : ''}</div>
           <div>Budget: ${fmt$(totalBudget(e))}${(e.staff||[]).length ? ' · Staff: ' + (e.staff||[]).join(', ') : ''}</div>
         </div>
       `).join('')}
@@ -4422,7 +4491,7 @@ function openDetail(id) {
 
     <div class="form-grid">
       <div class="row"><span class="lbl">Date</span><span class="val">${fmtDate(e.date)}</span></div>
-      <div class="row"><span class="lbl">Time</span><span class="val">${escapeHtml(e.time || '—')}</span></div>
+      <div class="row"><span class="lbl">Time</span><span class="val">${e.time ? escapeHtml(fmtTime(e.time)) : '—'}</span></div>
       <div class="row"><span class="lbl">Duration</span><span class="val">${escapeHtml(e.duration || '—')}</span></div>
       <div class="row"><span class="lbl">Location</span><span class="val">${escapeHtml(e.location||'—')}</span></div>
       <div class="row"><span class="lbl">Contact</span><span class="val">${escapeHtml(e.contact||'—')}</span></div>
@@ -9056,6 +9125,17 @@ async function checkRecurringEvents() {
   subscribeTemplates();
   subscribeVendors();
   subscribeSettings();
+
+  // Time format toggle wiring
+  const tfBtn = document.getElementById('timeFormatToggle');
+  if (tfBtn) {
+    updateTimeFormatToggle();
+    tfBtn.onclick = () => {
+      const cur = getTimeFormat();
+      setTimeFormat(cur === '24' ? '12' : '24');
+      toast(`Time format: ${getTimeFormat() === '24' ? '24-hour (military)' : '12-hour (AM/PM)'}`);
+    };
+  }
 
   // Global search wiring
   const gs = document.getElementById('globalSearch');

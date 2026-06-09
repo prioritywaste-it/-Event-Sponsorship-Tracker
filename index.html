@@ -9,17 +9,24 @@
 <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
   :root {
-    /* Priority Waste Official Brand Colors */
-    --pw-yellow: #FFC20E;
-    --pw-yellow-hover: #E5AD00;
+    /* Priority Waste Official Brand Colors (2026 refresh) */
+    --pw-yellow: #FFCE1F;          /* logo lemon-yellow */
+    --pw-yellow-hover: #EAB800;
     --pw-black: #000000;
     --pw-dark-gray: #333333;
     --pw-light-gray: #F4F4F4;
     --pw-white: #FFFFFF;
-    
+
+    /* New brand sky-blue (primary interactive accent) */
+    --pw-blue: #5BBFE5;
+    --pw-blue-hover: #3AA8D4;
+    --pw-blue-dark: #2589B8;       /* readable blue for links/text on white */
+    --pw-blue-soft: rgba(91, 191, 229, 0.14);
+    --pw-blue-medium: rgba(91, 191, 229, 0.28);
+
     /* Extended Palette */
-    --pw-yellow-soft: rgba(255, 194, 14, 0.12);
-    --pw-yellow-medium: rgba(255, 194, 14, 0.25);
+    --pw-yellow-soft: rgba(255, 206, 31, 0.12);
+    --pw-yellow-medium: rgba(255, 206, 31, 0.25);
     
     /* Status Colors */
     --status-pending: #F59E0B;
@@ -71,13 +78,14 @@
     width: 46px;
     height: 46px;
     background: var(--pw-yellow);
-    border-radius: 4px;
+    border: 2px solid var(--pw-blue);
+    border-radius: 50%;
     display: flex;
     align-items: center;
     justify-content: center;
     font-family: 'Bebas Neue', sans-serif;
-    font-size: 22px;
-    color: var(--pw-black);
+    font-size: 20px;
+    color: var(--pw-blue-dark);
     letter-spacing: -0.02em;
   }
   
@@ -299,15 +307,15 @@
   }
   
   .btn:not(.ghost):not(.danger):not(.green) {
-    background: var(--pw-yellow);
+    background: var(--pw-blue);
     color: var(--pw-black);
-    box-shadow: 0 2px 8px rgba(255, 194, 14, 0.4);
+    box-shadow: 0 2px 8px rgba(91, 191, 229, 0.4);
   }
-  
+
   .btn:not(.ghost):not(.danger):not(.green):hover {
-    background: var(--pw-yellow-hover);
+    background: var(--pw-blue-hover);
     transform: translateY(-1px);
-    box-shadow: 0 4px 12px rgba(255, 194, 14, 0.5);
+    box-shadow: 0 4px 12px rgba(91, 191, 229, 0.5);
   }
   
   .btn:active {
@@ -713,8 +721,8 @@
   
   input:focus, select:focus, textarea:focus {
     outline: none;
-    border-color: var(--pw-yellow);
-    box-shadow: 0 0 0 3px var(--pw-yellow-soft);
+    border-color: var(--pw-blue);
+    box-shadow: 0 0 0 3px var(--pw-blue-soft);
   }
   
   textarea {
@@ -825,7 +833,7 @@
     text-decoration: none;
     word-break: break-all;
   }
-  .att-meta a:hover { color: var(--pw-yellow-hover); text-decoration: underline; }
+  .att-meta a:hover { color: var(--pw-blue-dark); text-decoration: underline; }
   .att-sub {
     font-family: 'JetBrains Mono', monospace;
     font-size: 10px;
@@ -916,8 +924,8 @@
     color: var(--pw-black);
   }
   .view-tabs button.active {
-    background: var(--pw-black);
-    color: var(--pw-yellow);
+    background: var(--pw-blue);
+    color: var(--pw-black);
   }
   .view-tabs .vt-icon {
     width: 14px; height: 14px; display: inline-block;
@@ -2127,17 +2135,26 @@ const EVENTS_DOC = db.collection('app').doc('events');
 const TEMPLATES_DOC = db.collection('app').doc('templates');
 const VENDORS_DOC = db.collection('app').doc('vendors');
 const SETTINGS_DOC = db.collection('app').doc('settings');
+const MERCH_ITEMS_DOC = db.collection('app').doc('merch_items');
+const MERCH_KITS_DOC = db.collection('app').doc('merch_kits');
+const MERCH_REQUESTS_DOC = db.collection('app').doc('merch_requests');
 
 /* ---------- State ---------- */
 const KEY = 'pw_events_v1'; // localStorage cache key
 const TEMPLATES_KEY = 'pw_templates_v1';
 const VENDORS_KEY = 'pw_vendors_v1';
 const SETTINGS_KEY = 'pw_settings_v1';
+const MERCH_ITEMS_KEY = 'pw_merch_items_v1';
+const MERCH_KITS_KEY = 'pw_merch_kits_v1';
+const MERCH_REQUESTS_KEY = 'pw_merch_requests_v1';
 const SUBMITTER_KEY = 'pw_submitter_name'; // who is currently using the app
 const SHARED = true; // used by Zapier webhook config storage (window.storage)
 let events = [];
 let templates = [];
 let vendors = [];
+let merchItems = [];     // master inventory list
+let merchKits = [];      // kit definitions (recipes)
+let merchRequests = [];  // kit request / taken log
 let appSettings = {
   autoApproveUnder: 0,        // auto-approve threshold (0 = disabled)
   requireSecondApprovalOver: 0, // dual sign-off threshold
@@ -2334,6 +2351,91 @@ function subscribeSettings() {
     appSettings = Object.assign(appSettings, snap.data() || {});
     try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(appSettings)); } catch (e) {}
     if (activeView === 'settings' && typeof render === 'function') render();
+  });
+}
+
+/* ---------- Merch & Kits storage (Firestore + localStorage cache) ---------- */
+async function loadMerchItems() {
+  try { merchItems = JSON.parse(localStorage.getItem(MERCH_ITEMS_KEY) || '[]'); }
+  catch (e) { merchItems = []; }
+  try {
+    const snap = await MERCH_ITEMS_DOC.get();
+    if (snap.exists && Array.isArray(snap.data().items)) {
+      merchItems = snap.data().items;
+      localStorage.setItem(MERCH_ITEMS_KEY, JSON.stringify(merchItems));
+    }
+  } catch (e) { console.log('Merch items load failed:', e); }
+}
+async function saveMerchItems() {
+  try { localStorage.setItem(MERCH_ITEMS_KEY, JSON.stringify(merchItems)); } catch (e) {}
+  try { await MERCH_ITEMS_DOC.set({ items: merchItems, updatedAt: Date.now() }); }
+  catch (e) { console.log('Merch items Firestore save failed:', e); }
+}
+function subscribeMerchItems() {
+  MERCH_ITEMS_DOC.onSnapshot(snap => {
+    if (!snap.exists) return;
+    const d = snap.data();
+    if (Array.isArray(d.items)) {
+      merchItems = d.items;
+      try { localStorage.setItem(MERCH_ITEMS_KEY, JSON.stringify(merchItems)); } catch (e) {}
+      if (activeView === 'merch' && typeof render === 'function') render();
+    }
+  });
+}
+
+async function loadMerchKits() {
+  try { merchKits = JSON.parse(localStorage.getItem(MERCH_KITS_KEY) || '[]'); }
+  catch (e) { merchKits = []; }
+  try {
+    const snap = await MERCH_KITS_DOC.get();
+    if (snap.exists && Array.isArray(snap.data().kits)) {
+      merchKits = snap.data().kits;
+      localStorage.setItem(MERCH_KITS_KEY, JSON.stringify(merchKits));
+    }
+  } catch (e) { console.log('Merch kits load failed:', e); }
+}
+async function saveMerchKits() {
+  try { localStorage.setItem(MERCH_KITS_KEY, JSON.stringify(merchKits)); } catch (e) {}
+  try { await MERCH_KITS_DOC.set({ kits: merchKits, updatedAt: Date.now() }); }
+  catch (e) { console.log('Merch kits Firestore save failed:', e); }
+}
+function subscribeMerchKits() {
+  MERCH_KITS_DOC.onSnapshot(snap => {
+    if (!snap.exists) return;
+    const d = snap.data();
+    if (Array.isArray(d.kits)) {
+      merchKits = d.kits;
+      try { localStorage.setItem(MERCH_KITS_KEY, JSON.stringify(merchKits)); } catch (e) {}
+      if (activeView === 'merch' && typeof render === 'function') render();
+    }
+  });
+}
+
+async function loadMerchRequests() {
+  try { merchRequests = JSON.parse(localStorage.getItem(MERCH_REQUESTS_KEY) || '[]'); }
+  catch (e) { merchRequests = []; }
+  try {
+    const snap = await MERCH_REQUESTS_DOC.get();
+    if (snap.exists && Array.isArray(snap.data().requests)) {
+      merchRequests = snap.data().requests;
+      localStorage.setItem(MERCH_REQUESTS_KEY, JSON.stringify(merchRequests));
+    }
+  } catch (e) { console.log('Merch requests load failed:', e); }
+}
+async function saveMerchRequests() {
+  try { localStorage.setItem(MERCH_REQUESTS_KEY, JSON.stringify(merchRequests)); } catch (e) {}
+  try { await MERCH_REQUESTS_DOC.set({ requests: merchRequests, updatedAt: Date.now() }); }
+  catch (e) { console.log('Merch requests Firestore save failed:', e); }
+}
+function subscribeMerchRequests() {
+  MERCH_REQUESTS_DOC.onSnapshot(snap => {
+    if (!snap.exists) return;
+    const d = snap.data();
+    if (Array.isArray(d.requests)) {
+      merchRequests = d.requests;
+      try { localStorage.setItem(MERCH_REQUESTS_KEY, JSON.stringify(merchRequests)); } catch (e) {}
+      if (activeView === 'merch' && typeof render === 'function') render();
+    }
   });
 }
 
@@ -2556,6 +2658,7 @@ const VIEW_DEFS = {
   monthly: { label: 'Monthly Rollup', icon: '☰', renderer: renderMonthlyView, roles: ['reports','vp','coordinator'] },
   print: { label: 'Print Report', icon: '✎', renderer: renderPrintView, roles: ['reports','vp','coordinator'] },
   staff: { label: 'Staff Roster', icon: '☻', renderer: renderStaffView, roles: ['coordinator','vp'] },
+  merch: { label: 'Merch & Kits', icon: '🎁', renderer: renderMerchView, roles: ['coordinator','vp','reports'] },
   templates: { label: 'Templates', icon: '⚡', renderer: renderTemplatesView, roles: ['coordinator','vp'] },
   vendors: { label: 'Vendors', icon: '🛒', renderer: renderVendorsView, roles: ['coordinator','vp'] },
   sync: { label: 'Outlook Sync', icon: '⇆', renderer: renderSyncView, roles: ['coordinator','vp','reports'] },
@@ -9096,6 +9199,624 @@ async function checkRecurringEvents() {
   }
 }
 
+/* ============================================================
+   MERCH & KITS  —  inventory + tiered kit tracker
+   - merchItems    : master inventory list (with vendor + reorder data)
+   - merchKits     : kit definitions (recipes of items per tier)
+   - merchRequests : log of kits taken / requested (deducts component stock)
+   ============================================================ */
+
+const MERCH_SUBVIEW_KEY = 'pw_merch_subview';
+let merchSubView = (() => {
+  try { return localStorage.getItem(MERCH_SUBVIEW_KEY) || 'take'; } catch (e) { return 'take'; }
+})();
+let _kitEditId = null; // kit currently loaded into the builder (null = new)
+
+function setMerchSubView(v) {
+  merchSubView = v;
+  try { localStorage.setItem(MERCH_SUBVIEW_KEY, v); } catch (e) {}
+  if (v !== 'kits') _kitEditId = null;
+  renderMerchView();
+}
+
+/* ---------- Merch helpers ---------- */
+function merchItemById(id) { return merchItems.find(i => i.id === id); }
+function mNum(n) { return Number.isFinite(+n) ? +n : 0; }
+function kitComponentCost(kit) {
+  return (kit.items || []).reduce((s, c) => {
+    const it = merchItemById(c.itemId);
+    return s + (it ? mNum(it.unitCost) * mNum(c.qty) : 0);
+  }, 0);
+}
+function inventoryValue() {
+  return merchItems.reduce((s, i) => s + mNum(i.unitCost) * mNum(i.qtyOnHand), 0);
+}
+function lowStockItems() {
+  return merchItems.filter(i => mNum(i.qtyOnHand) <= mNum(i.reorderPoint));
+}
+// How many of a kit can be built given current stock
+function kitBuildableCount(kit) {
+  if (!kit.items || !kit.items.length) return 0;
+  let min = Infinity;
+  for (const c of kit.items) {
+    const it = merchItemById(c.itemId);
+    const per = mNum(c.qty);
+    if (!it || per <= 0) { min = 0; break; }
+    min = Math.min(min, Math.floor(mNum(it.qtyOnHand) / per));
+  }
+  return min === Infinity ? 0 : min;
+}
+// Check stock for taking `qty` of a kit; returns shortages
+function kitShortages(kit, qty) {
+  const out = [];
+  for (const c of (kit.items || [])) {
+    const it = merchItemById(c.itemId);
+    const need = mNum(c.qty) * mNum(qty);
+    const have = it ? mNum(it.qtyOnHand) : 0;
+    if (!it || have < need) out.push({ name: it ? it.name : '(missing item)', need, have });
+  }
+  return out;
+}
+function tierLabel(kit) {
+  const t = kit.tier;
+  if (t === 'onboarding') return 'Onboarding';
+  if (t === 'custom' || !t) return 'Custom';
+  return '$' + t;
+}
+function monthKey(ts) { const d = new Date(ts); return d.getFullYear() + '-' + (d.getMonth()+1); }
+function kitsTakenThisMonth() {
+  const now = monthKey(Date.now());
+  return merchRequests.filter(r => r.status === 'taken' && monthKey(r.takenAt) === now)
+    .reduce((s, r) => s + mNum(r.qty), 0);
+}
+
+/* ---------- Seed starter data (idempotent) ---------- */
+function seedMerchIfEmpty() {
+  if (merchItems.length || merchKits.length || merchRequests.length) return;
+  const now = Date.now();
+  const mk = (key, name, category, unitCost, qtyOnHand, reorderPoint, reorderQty) => ({
+    id: 'm_' + key, key, name, sku: '', category,
+    unitCost, qtyOnHand, reorderPoint, reorderQty,
+    vendorName: '', vendorContact: '', vendorEmail: '', vendorPhone: '',
+    vendorSku: '', vendorUrl: '', leadTimeDays: '', notes: '',
+    addedAt: now, addedBy: 'System (seed)', updatedAt: now
+  });
+  merchItems = [
+    mk('pen',       'PW Logo Pen',                'Writing',    0.85,  500, 100, 500),
+    mk('sanitizer', 'Hand Sanitizer (2 oz)',      'Health',     1.75,  300,  75, 250),
+    mk('minican',   'Mini Trash Can (desktop)',   'Signature',  6.50,  120,  30, 100),
+    mk('tote',      'Reusable Tote Bag',          'Bags',       2.25,  200,  50, 200),
+    mk('sticker',   'Sticker Sheet',              'Print',      0.40, 1000, 200,1000),
+    mk('koozie',    'Can Koozie',                 'Drinkware',  1.10,  300,  75, 300),
+    mk('tumbler',   'Tumbler / Water Bottle',     'Drinkware',  7.50,   80,  20, 100),
+    mk('tshirt',    'T-Shirt (PW branded)',       'Apparel',    6.00,  150,  40, 150),
+    mk('notebook',  'Branded Notebook',           'Writing',    3.25,  150,  40, 150),
+    mk('lanyard',   'Lanyard + Badge Holder',     'Onboarding', 1.20,  200,  50, 200),
+    mk('box',       'Branded Gift Box / Mailer',  'Packaging',  2.00,  100,  30, 100),
+  ];
+  const id = k => 'm_' + k;
+  merchKits = [
+    { id: 'k_event50',  name: '$50 Event Kit',           tier: '50',  category: 'event',
+      description: 'Lightweight giveaway kit for small events & tabling.', targetCost: 50, active: true,
+      items: [ {itemId:id('pen'),qty:3},{itemId:id('sticker'),qty:3},{itemId:id('koozie'),qty:2},{itemId:id('sanitizer'),qty:2},{itemId:id('tote'),qty:1} ],
+      addedAt: now, addedBy: 'System (seed)' },
+    { id: 'k_event100', name: '$100 Event Kit',          tier: '100', category: 'event',
+      description: 'Mid-tier kit for sponsorships & community events.', targetCost: 100, active: true,
+      items: [ {itemId:id('pen'),qty:5},{itemId:id('sticker'),qty:5},{itemId:id('koozie'),qty:3},{itemId:id('sanitizer'),qty:3},{itemId:id('tote'),qty:2},{itemId:id('tumbler'),qty:1},{itemId:id('notebook'),qty:1} ],
+      addedAt: now, addedBy: 'System (seed)' },
+    { id: 'k_event300', name: '$300 Event Kit (Booth/Bulk)', tier: '300', category: 'event',
+      description: 'Full booth load-out for large events & festivals.', targetCost: 300, active: true,
+      items: [ {itemId:id('pen'),qty:20},{itemId:id('sticker'),qty:20},{itemId:id('koozie'),qty:10},{itemId:id('sanitizer'),qty:10},{itemId:id('tote'),qty:8},{itemId:id('tumbler'),qty:4},{itemId:id('tshirt'),qty:4},{itemId:id('minican'),qty:3},{itemId:id('notebook'),qty:5} ],
+      addedAt: now, addedBy: 'System (seed)' },
+    { id: 'k_onboard',  name: 'Employee Onboarding Kit', tier: 'onboarding', category: 'onboarding',
+      description: 'New-hire welcome kit (HR).', targetCost: 0, active: true,
+      items: [ {itemId:id('tshirt'),qty:1},{itemId:id('tumbler'),qty:1},{itemId:id('notebook'),qty:1},{itemId:id('pen'),qty:2},{itemId:id('lanyard'),qty:1},{itemId:id('sticker'),qty:2},{itemId:id('tote'),qty:1},{itemId:id('box'),qty:1} ],
+      addedAt: now, addedBy: 'System (seed)' },
+  ];
+  saveMerchItems();
+  saveMerchKits();
+  toast('🎁 Seeded starter merch items & kit tiers');
+}
+
+/* ---------- Actions: inventory items ---------- */
+async function addMerchItem() {
+  const name = (document.getElementById('mi_name')?.value || '').trim();
+  if (!name) { toast('Enter an item name'); return; }
+  merchItems.push({
+    id: 'm_' + Math.random().toString(36).slice(2,9),
+    name,
+    sku: (document.getElementById('mi_sku')?.value || '').trim(),
+    category: (document.getElementById('mi_category')?.value || '').trim(),
+    unitCost: mNum(document.getElementById('mi_unitCost')?.value),
+    qtyOnHand: mNum(document.getElementById('mi_qty')?.value),
+    reorderPoint: mNum(document.getElementById('mi_reorderPoint')?.value),
+    reorderQty: mNum(document.getElementById('mi_reorderQty')?.value),
+    vendorName: (document.getElementById('mi_vendorName')?.value || '').trim(),
+    vendorContact: '', vendorEmail: '', vendorPhone: '', vendorSku: '', vendorUrl: '',
+    leadTimeDays: '', notes: (document.getElementById('mi_notes')?.value || '').trim(),
+    addedAt: Date.now(), addedBy: getSubmitter() || 'Coordinator', updatedAt: Date.now()
+  });
+  await saveMerchItems();
+  toast('Item added');
+  renderMerchView();
+}
+async function updateMerchItemField(id, field, value) {
+  const it = merchItemById(id); if (!it) return;
+  const numFields = ['unitCost','qtyOnHand','reorderPoint','reorderQty','leadTimeDays'];
+  it[field] = numFields.includes(field) ? mNum(value) : (value || '').trim();
+  it.updatedAt = Date.now();
+  await saveMerchItems();
+  // Light refresh for reorder badges; only full re-render on qty/cost changes
+  if (['qtyOnHand','unitCost','reorderPoint'].includes(field)) renderMerchView();
+}
+async function adjustItemQty(id, delta) {
+  const it = merchItemById(id); if (!it) return;
+  it.qtyOnHand = Math.max(0, mNum(it.qtyOnHand) + delta);
+  it.updatedAt = Date.now();
+  await saveMerchItems();
+  renderMerchView();
+}
+async function restockItem(id) {
+  const it = merchItemById(id); if (!it) return;
+  const def = mNum(it.reorderQty) || 0;
+  const entered = window.prompt(`Receive stock for "${it.name}".\nHow many units are you adding?`, def || '');
+  if (entered === null) return;
+  const add = mNum(entered);
+  if (add <= 0) { toast('Enter a positive number'); return; }
+  it.qtyOnHand = mNum(it.qtyOnHand) + add;
+  it.lastRestockAt = Date.now();
+  it.updatedAt = Date.now();
+  await saveMerchItems();
+  toast(`Restocked ${add} × ${it.name}`);
+  renderMerchView();
+}
+async function deleteMerchItem(id) {
+  const it = merchItemById(id); if (!it) return;
+  const usedBy = merchKits.filter(k => (k.items||[]).some(c => c.itemId === id)).map(k => k.name);
+  let msg = `Delete item "${it.name}"?`;
+  if (usedBy.length) msg += `\n\n⚠️ It's used in: ${usedBy.join(', ')}. Those kits will lose this component.`;
+  if (!confirm(msg)) return;
+  merchItems = merchItems.filter(x => x.id !== id);
+  await saveMerchItems();
+  toast('Item deleted');
+  renderMerchView();
+}
+
+/* ---------- Actions: kit builder ---------- */
+function editKit(id) { _kitEditId = id; setMerchSubView('kits'); }
+function newKit() { _kitEditId = null; setMerchSubView('kits'); }
+async function duplicateKit(id) {
+  const k = merchKits.find(x => x.id === id); if (!k) return;
+  merchKits.push(Object.assign({}, JSON.parse(JSON.stringify(k)), {
+    id: 'k_' + Math.random().toString(36).slice(2,9),
+    name: k.name + ' (copy)', addedAt: Date.now(), addedBy: getSubmitter() || 'Coordinator'
+  }));
+  await saveMerchKits();
+  toast('Kit duplicated');
+  renderMerchView();
+}
+async function deleteKit(id) {
+  const k = merchKits.find(x => x.id === id); if (!k) return;
+  if (!confirm(`Delete kit "${k.name}"? (Past activity log entries are kept.)`)) return;
+  merchKits = merchKits.filter(x => x.id !== id);
+  if (_kitEditId === id) _kitEditId = null;
+  await saveMerchKits();
+  toast('Kit deleted');
+  renderMerchView();
+}
+async function saveKitFromForm() {
+  const name = (document.getElementById('kb_name')?.value || '').trim();
+  if (!name) { toast('Enter a kit name'); return; }
+  const items = [];
+  merchItems.forEach(it => {
+    const el = document.getElementById('kb_qty_' + it.id);
+    const q = el ? mNum(el.value) : 0;
+    if (q > 0) items.push({ itemId: it.id, qty: q });
+  });
+  if (!items.length) { toast('Add at least one item with a quantity'); return; }
+  const data = {
+    name,
+    tier: document.getElementById('kb_tier')?.value || 'custom',
+    category: document.getElementById('kb_category')?.value || 'event',
+    description: (document.getElementById('kb_desc')?.value || '').trim(),
+    targetCost: mNum(document.getElementById('kb_target')?.value),
+    items, active: true
+  };
+  if (_kitEditId) {
+    const k = merchKits.find(x => x.id === _kitEditId);
+    if (k) Object.assign(k, data, { updatedAt: Date.now() });
+    toast('Kit updated');
+  } else {
+    merchKits.push(Object.assign({ id: 'k_' + Math.random().toString(36).slice(2,9),
+      addedAt: Date.now(), addedBy: getSubmitter() || 'Coordinator' }, data));
+    toast('Kit created');
+  }
+  _kitEditId = null;
+  await saveMerchKits();
+  renderMerchView();
+}
+
+/* ---------- Action: take / check out a kit ---------- */
+async function takeKit() {
+  const kitId = document.getElementById('tk_kit')?.value;
+  const kit = merchKits.find(k => k.id === kitId);
+  if (!kit) { toast('Pick a kit'); return; }
+  const qty = Math.max(1, mNum(document.getElementById('tk_qty')?.value) || 1);
+  const shortages = kitShortages(kit, qty);
+  if (shortages.length) {
+    alert('Not enough stock to take ' + qty + ' × ' + kit.name + ':\n\n' +
+      shortages.map(s => `• ${s.name}: need ${s.need}, have ${s.have}`).join('\n') +
+      '\n\nRestock these items or reduce the quantity.');
+    return;
+  }
+  const team = document.getElementById('tk_team')?.value || '';
+  const purpose = (document.getElementById('tk_purpose')?.value || '').trim();
+  const eventName = (document.getElementById('tk_event')?.value || '').trim();
+  const person = (document.getElementById('tk_person')?.value || '').trim() || getSubmitter() || 'Coordinator';
+  // Deduct components & snapshot what was taken
+  const components = [];
+  kit.items.forEach(c => {
+    const it = merchItemById(c.itemId);
+    const take = mNum(c.qty) * qty;
+    if (it) { it.qtyOnHand = Math.max(0, mNum(it.qtyOnHand) - take); it.updatedAt = Date.now(); }
+    components.push({ itemId: c.itemId, name: it ? it.name : '(deleted)', qty: take });
+  });
+  const costAtTime = kitComponentCost(kit) * qty;
+  merchRequests.unshift({
+    id: 'r_' + Math.random().toString(36).slice(2,9),
+    kitId: kit.id, kitName: kit.name, tier: kit.tier, category: kit.category,
+    qty, team, purpose, eventName, person,
+    status: 'taken', costAtTime, components,
+    takenAt: Date.now(), by: getSubmitter() || 'Coordinator'
+  });
+  await Promise.all([saveMerchItems(), saveMerchRequests()]);
+  toast(`✓ ${qty} × ${kit.name} checked out`);
+  renderMerchView();
+}
+async function voidRequest(id) {
+  const r = merchRequests.find(x => x.id === id);
+  if (!r || r.status !== 'taken') return;
+  if (!confirm(`Void this checkout (${r.qty} × ${r.kitName}) and return components to stock?`)) return;
+  (r.components || []).forEach(c => {
+    const it = merchItemById(c.itemId);
+    if (it) { it.qtyOnHand = mNum(it.qtyOnHand) + mNum(c.qty); it.updatedAt = Date.now(); }
+  });
+  r.status = 'voided';
+  r.voidedAt = Date.now();
+  r.voidedBy = getSubmitter() || 'Coordinator';
+  await Promise.all([saveMerchItems(), saveMerchRequests()]);
+  toast('Checkout voided — stock returned');
+  renderMerchView();
+}
+
+/* ---------- Reorder CSV export ---------- */
+function exportReorderCsv() {
+  const low = lowStockItems();
+  const rows = [['Item','SKU','Category','On Hand','Reorder Point','Suggested Order Qty','Unit Cost','Est. Reorder Cost','Vendor','Vendor SKU','Vendor Contact','Vendor Email','Vendor Phone','Lead Time (days)','Notes']];
+  low.forEach(i => {
+    const orderQty = mNum(i.reorderQty) || (mNum(i.reorderPoint) * 2 - mNum(i.qtyOnHand));
+    rows.push([i.name, i.sku||'', i.category||'', mNum(i.qtyOnHand), mNum(i.reorderPoint), orderQty,
+      mNum(i.unitCost), (mNum(i.unitCost)*orderQty).toFixed(2), i.vendorName||'', i.vendorSku||'',
+      i.vendorContact||'', i.vendorEmail||'', i.vendorPhone||'', i.leadTimeDays||'', (i.notes||'').replace(/\n/g,' ')]);
+  });
+  const csv = rows.map(r => r.map(c => {
+    const s = String(c == null ? '' : c);
+    return /[",\n]/.test(s) ? '"' + s.replace(/"/g,'""') + '"' : s;
+  }).join(',')).join('\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'pw_reorder_report_' + new Date().toISOString().slice(0,10) + '.csv';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  toast('Reorder CSV downloaded');
+}
+
+/* ---------- Merch view renderer ---------- */
+function renderMerchView() {
+  const c = document.getElementById('content');
+  if (!c) return;
+  const low = lowStockItems();
+  const kpis = [
+    { label: 'Inventory Value', value: fmt$(Math.round(inventoryValue())), delta: merchItems.length + ' item type' + (merchItems.length!==1?'s':'') },
+    { label: 'Kits Defined', value: merchKits.length, delta: merchKits.filter(k=>k.category==='event').length + ' event · ' + merchKits.filter(k=>k.category==='onboarding').length + ' onboarding' },
+    { label: 'Kits Taken (this month)', value: kitsTakenThisMonth(), delta: merchRequests.filter(r=>r.status==='taken').length + ' total checkouts' },
+    { label: 'Low-Stock Items', value: low.length, delta: low.length ? 'Need reorder' : 'All stocked' },
+  ];
+  const subtabs = [
+    ['take','Take a Kit','🎁'],
+    ['kits','Kit Catalog','📦'],
+    ['inventory','Inventory Master','📋'],
+    ['log','Activity Log','🧾'],
+    ['reorder','Reorder Report','🔄'],
+  ];
+  const subnav = subtabs.map(([k,label,ic]) =>
+    `<button onclick="setMerchSubView('${k}')" style="font-family:'Inter',sans-serif;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;padding:9px 14px;border-radius:5px;cursor:pointer;border:2px solid ${merchSubView===k?'var(--pw-blue)':'#e2e2e2'};background:${merchSubView===k?'var(--pw-blue)':'#fff'};color:${merchSubView===k?'#000':'#555'}">${ic} ${label}${k==='reorder'&&low.length?` <span style="background:var(--status-denied);color:#fff;border-radius:10px;padding:1px 7px;font-size:10px;margin-left:4px">${low.length}</span>`:''}</button>`
+  ).join('');
+
+  const lowBanner = low.length ? `
+    <div style="display:flex;align-items:center;gap:10px;background:#FEF3C7;border:1px solid #FCD34D;border-radius:8px;padding:12px 16px;margin-bottom:16px">
+      <span style="font-size:18px">⚠️</span>
+      <div style="flex:1;font-size:13px"><strong>${low.length} item${low.length!==1?'s':''} at or below reorder point.</strong> ${escapeHtml(low.slice(0,4).map(i=>i.name).join(', '))}${low.length>4?'…':''}</div>
+      <button class="btn small" onclick="setMerchSubView('reorder')">View reorder list</button>
+    </div>` : '';
+
+  c.innerHTML = `
+    <div class="report-card wide">
+      <h3>Merch &amp; Kits <span class="rc-sub">Inventory · tiered kits · checkouts — shared</span></h3>
+      <div class="stats" style="margin:4px 0 18px">
+        ${kpis.map(s=>`<div class="stat"><div class="label">${s.label}</div><div class="value">${s.value}</div><div class="delta">${s.delta}</div></div>`).join('')}
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:18px">${subnav}</div>
+      ${lowBanner}
+      <div id="merchBody"></div>
+    </div>`;
+  renderMerchBody();
+}
+
+function renderMerchBody() {
+  const b = document.getElementById('merchBody');
+  if (!b) return;
+  if (merchSubView === 'take') return renderMerchTake(b);
+  if (merchSubView === 'kits') return renderMerchKits(b);
+  if (merchSubView === 'inventory') return renderMerchInventory(b);
+  if (merchSubView === 'log') return renderMerchLog(b);
+  if (merchSubView === 'reorder') return renderMerchReorder(b);
+}
+
+/* --- Sub-view: Take a Kit --- */
+function renderMerchTake(b) {
+  const kits = merchKits.filter(k => k.active !== false);
+  const eventNames = [...new Set((events||[]).map(e => e.name).filter(Boolean))];
+  const recent = merchRequests.filter(r => r.status === 'taken').slice(0, 8);
+  if (!kits.length) {
+    b.innerHTML = `<div style="background:#fafafa;padding:24px;text-align:center;color:#888;border-radius:6px">No kits defined yet. Go to <a href="#" onclick="setMerchSubView('kits');return false" style="color:var(--pw-blue-dark);font-weight:700">Kit Catalog</a> to build one.</div>`;
+    return;
+  }
+  b.innerHTML = `
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:18px;align-items:start">
+      <fieldset style="margin:0">
+        <legend style="font-family:'JetBrains Mono',monospace;font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:#666;padding:0 6px">Check out a kit</legend>
+        <label style="font-size:11px;font-weight:600;color:#555">Kit</label>
+        <select id="tk_kit" onchange="renderMerchTakePreview()">
+          ${kits.map(k => `<option value="${k.id}">${escapeHtml(k.name)} — ${tierLabel(k)} · ${kitBuildableCount(k)} in stock</option>`).join('')}
+        </select>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px">
+          <div><label style="font-size:11px;font-weight:600;color:#555">Quantity</label>
+            <input type="number" id="tk_qty" value="1" min="1" step="1" oninput="renderMerchTakePreview()" /></div>
+          <div><label style="font-size:11px;font-weight:600;color:#555">Team</label>
+            <select id="tk_team">
+              <option>Sales</option><option>Marketing</option><option>HR / Onboarding</option>
+              <option>Operations</option><option>Executive</option><option>Other</option>
+            </select></div>
+        </div>
+        <label style="font-size:11px;font-weight:600;color:#555;margin-top:10px;display:block">Person taking it</label>
+        <input type="text" id="tk_person" placeholder="Name" value="${escapeHtml(getSubmitter()||'')}" />
+        <label style="font-size:11px;font-weight:600;color:#555;margin-top:10px;display:block">Event (optional)</label>
+        <input type="text" id="tk_event" list="tk_eventList" placeholder="Linked event / occasion" />
+        <datalist id="tk_eventList">${eventNames.map(n=>`<option value="${escapeHtml(n)}">`).join('')}</datalist>
+        <label style="font-size:11px;font-weight:600;color:#555;margin-top:10px;display:block">Purpose / notes</label>
+        <input type="text" id="tk_purpose" placeholder="e.g. Chamber of Commerce booth" />
+        <div style="margin-top:14px"><button class="btn" onclick="takeKit()">🎁 Check Out Kit</button></div>
+      </fieldset>
+      <div>
+        <div id="tk_preview"></div>
+        <h4 style="font-family:'JetBrains Mono',monospace;font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:#666;margin:18px 0 8px">Recent checkouts</h4>
+        ${recent.length ? `<table class="report-table"><thead><tr><th>Kit</th><th class="num">Qty</th><th>Team</th><th>By</th><th>When</th></tr></thead><tbody>${recent.map(r=>`<tr><td>${escapeHtml(r.kitName)}</td><td class="num">${r.qty}</td><td>${escapeHtml(r.team||'—')}</td><td>${escapeHtml(r.person||r.by||'—')}</td><td style="font-size:11px;color:#777">${new Date(r.takenAt).toLocaleDateString()}</td></tr>`).join('')}</tbody></table>` : '<div style="color:#999;font-size:13px">No checkouts yet.</div>'}
+      </div>
+    </div>`;
+  renderMerchTakePreview();
+}
+function renderMerchTakePreview() {
+  const p = document.getElementById('tk_preview');
+  if (!p) return;
+  const kit = merchKits.find(k => k.id === document.getElementById('tk_kit')?.value);
+  if (!kit) { p.innerHTML = ''; return; }
+  const qty = Math.max(1, mNum(document.getElementById('tk_qty')?.value) || 1);
+  const shortages = kitShortages(kit, qty);
+  const rows = (kit.items||[]).map(c => {
+    const it = merchItemById(c.itemId);
+    const need = mNum(c.qty) * qty;
+    const have = it ? mNum(it.qtyOnHand) : 0;
+    const short = have < need;
+    return `<tr style="${short?'color:var(--status-denied)':''}"><td>${escapeHtml(it?it.name:'(missing)')}</td><td class="num">${need}</td><td class="num">${have}${short?' ⚠️':''}</td></tr>`;
+  }).join('');
+  const cost = kitComponentCost(kit) * qty;
+  p.innerHTML = `
+    <div style="border:1px solid #e2e2e2;border-radius:8px;padding:14px;background:#fafbfc">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <strong>${escapeHtml(kit.name)}</strong>
+        <span style="font-size:12px;color:#555">Component cost: <strong>${fmt$(cost.toFixed(2))}</strong>${kit.targetCost?` · target ${fmt$(kit.targetCost)}`:''}</span>
+      </div>
+      <table class="report-table" style="margin:0"><thead><tr><th>Will deduct</th><th class="num">Need</th><th class="num">On hand</th></tr></thead><tbody>${rows}</tbody></table>
+      ${shortages.length?`<div style="margin-top:8px;color:var(--status-denied);font-size:12px;font-weight:600">⚠️ Not enough stock — restock before checkout.</div>`:''}
+    </div>`;
+}
+
+/* --- Sub-view: Kit Catalog + builder --- */
+function renderMerchKits(b) {
+  const editing = _kitEditId ? merchKits.find(k => k.id === _kitEditId) : null;
+  const cards = merchKits.slice().sort((a,b)=>(a.tier||'').localeCompare(b.tier||'')).map(k => {
+    const cost = kitComponentCost(k);
+    const buildable = kitBuildableCount(k);
+    const margin = k.targetCost ? (k.targetCost - cost) : null;
+    return `
+      <div style="border:1px solid #e2e2e2;border-left:4px solid var(--pw-blue);border-radius:8px;padding:14px;background:#fff">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">
+          <div><strong style="font-size:15px">${escapeHtml(k.name)}</strong>
+            <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.05em;margin-top:2px">${tierLabel(k)} · ${k.category==='onboarding'?'Onboarding':'Event'}</div></div>
+          <span style="font-size:11px;font-weight:700;padding:3px 8px;border-radius:10px;background:${buildable>0?'var(--pw-blue-soft)':'#FEE2E2'};color:${buildable>0?'var(--pw-blue-dark)':'#B91C1C'}">${buildable} buildable</span>
+        </div>
+        ${k.description?`<p style="font-size:12px;color:#666;margin:8px 0">${escapeHtml(k.description)}</p>`:''}
+        <table class="report-table" style="margin:8px 0"><tbody>${(k.items||[]).map(c=>{const it=merchItemById(c.itemId);return `<tr><td style="font-size:12px">${escapeHtml(it?it.name:'(deleted item)')}</td><td class="num" style="font-size:12px">×${c.qty}</td></tr>`;}).join('')}</tbody></table>
+        <div style="display:flex;justify-content:space-between;align-items:center;font-size:12px;color:#555;border-top:1px dashed #eee;padding-top:8px">
+          <span>Cost: <strong>${fmt$(cost.toFixed(2))}</strong>${k.targetCost?` / target ${fmt$(k.targetCost)}`:''}</span>
+          ${margin!=null?`<span style="color:${margin>=0?'var(--status-approved)':'var(--status-denied)'}">${margin>=0?'under':'over'} by ${fmt$(Math.abs(margin).toFixed(2))}</span>`:''}
+        </div>
+        <div style="display:flex;gap:6px;margin-top:10px">
+          <button class="btn ghost small" onclick="editKit('${k.id}')">Edit</button>
+          <button class="btn ghost small" onclick="duplicateKit('${k.id}')">Duplicate</button>
+          <button class="btn ghost small" style="color:#dc2626" onclick="deleteKit('${k.id}')">Delete</button>
+        </div>
+      </div>`;
+  }).join('');
+
+  const compRows = merchItems.slice().sort((a,b)=>(a.name||'').localeCompare(b.name||'')).map(it => {
+    const cur = editing ? ((editing.items||[]).find(c=>c.itemId===it.id)?.qty || '') : '';
+    return `<tr><td style="font-size:12px">${escapeHtml(it.name)} <span style="color:#aaa">(${fmt$(it.unitCost)})</span></td><td style="width:90px"><input type="number" id="kb_qty_${it.id}" min="0" step="1" value="${cur}" placeholder="0" style="padding:6px 8px" /></td></tr>`;
+  }).join('');
+
+  b.innerHTML = `
+    <div style="display:grid;grid-template-columns:1.1fr 1fr;gap:20px;align-items:start">
+      <div>
+        <h4 style="font-family:'JetBrains Mono',monospace;font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:#666;margin:0 0 10px">Kit catalog (${merchKits.length})</h4>
+        <div style="display:grid;gap:14px">${cards || '<div style="color:#999;font-size:13px">No kits yet — build one →</div>'}</div>
+      </div>
+      <fieldset style="margin:0;position:sticky;top:88px">
+        <legend style="font-family:'JetBrains Mono',monospace;font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:#666;padding:0 6px">${editing?'Edit kit':'+ Build a kit'}</legend>
+        <label style="font-size:11px;font-weight:600;color:#555">Kit name</label>
+        <input type="text" id="kb_name" placeholder="e.g. $50 Event Kit" value="${editing?escapeHtml(editing.name):''}" />
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px">
+          <div><label style="font-size:11px;font-weight:600;color:#555">Tier</label>
+            <select id="kb_tier">
+              ${['50','100','300','onboarding','custom'].map(t=>`<option value="${t}" ${editing&&editing.tier===t?'selected':''}>${t==='onboarding'?'Onboarding':(t==='custom'?'Custom':'$'+t)}</option>`).join('')}
+            </select></div>
+          <div><label style="font-size:11px;font-weight:600;color:#555">Category</label>
+            <select id="kb_category">
+              <option value="event" ${editing&&editing.category==='event'?'selected':''}>Event merch</option>
+              <option value="onboarding" ${editing&&editing.category==='onboarding'?'selected':''}>Employee onboarding</option>
+            </select></div>
+        </div>
+        <label style="font-size:11px;font-weight:600;color:#555;margin-top:10px;display:block">Target cost / value ($, optional)</label>
+        <input type="number" id="kb_target" min="0" step="5" value="${editing?(editing.targetCost||''):''}" placeholder="e.g. 50" />
+        <label style="font-size:11px;font-weight:600;color:#555;margin-top:10px;display:block">Description</label>
+        <input type="text" id="kb_desc" value="${editing?escapeHtml(editing.description||''):''}" placeholder="Short description" />
+        <label style="font-size:11px;font-weight:600;color:#555;margin:12px 0 4px;display:block">Items in this kit (qty per kit)</label>
+        ${merchItems.length?`<table class="report-table" style="margin:0"><tbody>${compRows}</tbody></table>`:'<div style="color:#999;font-size:12px">Add inventory items first.</div>'}
+        <div style="display:flex;gap:8px;margin-top:14px">
+          <button class="btn" onclick="saveKitFromForm()">${editing?'Save changes':'Create kit'}</button>
+          ${editing?`<button class="btn ghost small" onclick="newKit()">Cancel edit</button>`:''}
+        </div>
+      </fieldset>
+    </div>`;
+}
+
+/* --- Sub-view: Inventory Master --- */
+function renderMerchInventory(b) {
+  const list = merchItems.slice().sort((a,b)=>(a.name||'').localeCompare(b.name||''));
+  const categories = [...new Set(list.map(i=>i.category).filter(Boolean))];
+  b.innerHTML = `
+    <fieldset style="margin:0 0 18px">
+      <legend style="font-family:'JetBrains Mono',monospace;font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:#666;padding:0 6px">+ Add inventory item</legend>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px">
+        <input type="text" id="mi_name" placeholder="Item name" />
+        <input type="text" id="mi_sku" placeholder="Internal SKU" />
+        <input type="text" id="mi_category" placeholder="Category" list="miCatList" />
+        <input type="number" id="mi_unitCost" placeholder="Unit cost $" step="0.01" min="0" />
+        <input type="number" id="mi_qty" placeholder="Qty on hand" step="1" min="0" />
+        <input type="number" id="mi_reorderPoint" placeholder="Reorder point" step="1" min="0" />
+        <input type="number" id="mi_reorderQty" placeholder="Reorder qty" step="1" min="0" />
+        <input type="text" id="mi_vendorName" placeholder="Vendor" />
+        <input type="text" id="mi_notes" placeholder="Notes" />
+      </div>
+      <datalist id="miCatList">${categories.map(c=>`<option value="${escapeHtml(c)}">`).join('')}</datalist>
+      <div style="margin-top:10px"><button class="btn small" onclick="addMerchItem()">+ Add Item</button></div>
+    </fieldset>
+    <p style="color:#666;font-size:12px;margin-bottom:10px">Click any cell to edit. <strong>Restock</strong> adds received units; <strong>+/−</strong> nudges by one. Rows turn amber at/below their reorder point. Use <strong>⋯ Vendor</strong> to expand vendor &amp; reorder details.</p>
+    ${list.length?`
+      <table class="report-table">
+        <thead><tr><th>Item</th><th>Category</th><th class="num">Unit $</th><th class="num">On hand</th><th class="num">Reorder pt</th><th class="num">Value</th><th>Vendor</th><th></th></tr></thead>
+        <tbody>
+        ${list.map(i=>{
+          const low = mNum(i.qtyOnHand) <= mNum(i.reorderPoint);
+          return `
+          <tr style="${low?'background:#FEF3C7':''}">
+            <td><input value="${escapeHtml(i.name||'')}" onchange="updateMerchItemField('${i.id}','name',this.value)" style="padding:6px 8px;font-weight:600;border-color:transparent;background:transparent" />${i.sku?`<div style="font-size:10px;color:#999;padding-left:8px">${escapeHtml(i.sku)}</div>`:''}</td>
+            <td><input value="${escapeHtml(i.category||'')}" onchange="updateMerchItemField('${i.id}','category',this.value)" style="padding:6px 8px;border-color:transparent;background:transparent" /></td>
+            <td class="num"><input type="number" step="0.01" min="0" value="${mNum(i.unitCost)}" onchange="updateMerchItemField('${i.id}','unitCost',this.value)" style="padding:6px 8px;width:80px;text-align:right" /></td>
+            <td class="num"><div style="display:flex;align-items:center;gap:2px;justify-content:flex-end"><button class="btn ghost small" style="padding:2px 7px" onclick="adjustItemQty('${i.id}',-1)">−</button><input type="number" step="1" min="0" value="${mNum(i.qtyOnHand)}" onchange="updateMerchItemField('${i.id}','qtyOnHand',this.value)" style="padding:6px 4px;width:62px;text-align:center" /><button class="btn ghost small" style="padding:2px 7px" onclick="adjustItemQty('${i.id}',1)">+</button></div></td>
+            <td class="num"><input type="number" step="1" min="0" value="${mNum(i.reorderPoint)}" onchange="updateMerchItemField('${i.id}','reorderPoint',this.value)" style="padding:6px 8px;width:64px;text-align:right" /></td>
+            <td class="num">${fmt$((mNum(i.unitCost)*mNum(i.qtyOnHand)).toFixed(2))}</td>
+            <td style="font-size:12px">${escapeHtml(i.vendorName||'—')}</td>
+            <td style="white-space:nowrap"><button class="btn ghost small" onclick="restockItem('${i.id}')">Restock</button> <button class="btn ghost small" onclick="toggleVendorRow('${i.id}')">⋯ Vendor</button> <button class="btn ghost small" style="color:#dc2626" onclick="deleteMerchItem('${i.id}')">✕</button></td>
+          </tr>
+          <tr id="vrow_${i.id}" style="display:none;background:#f7fafc"><td colspan="8" style="padding:12px 16px">
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px">
+              <div><label style="font-size:10px;color:#888;text-transform:uppercase">Vendor name</label><input value="${escapeHtml(i.vendorName||'')}" onchange="updateMerchItemField('${i.id}','vendorName',this.value)" /></div>
+              <div><label style="font-size:10px;color:#888;text-transform:uppercase">Vendor SKU / item #</label><input value="${escapeHtml(i.vendorSku||'')}" onchange="updateMerchItemField('${i.id}','vendorSku',this.value)" /></div>
+              <div><label style="font-size:10px;color:#888;text-transform:uppercase">Contact</label><input value="${escapeHtml(i.vendorContact||'')}" onchange="updateMerchItemField('${i.id}','vendorContact',this.value)" /></div>
+              <div><label style="font-size:10px;color:#888;text-transform:uppercase">Email</label><input value="${escapeHtml(i.vendorEmail||'')}" onchange="updateMerchItemField('${i.id}','vendorEmail',this.value)" /></div>
+              <div><label style="font-size:10px;color:#888;text-transform:uppercase">Phone</label><input value="${escapeHtml(i.vendorPhone||'')}" onchange="updateMerchItemField('${i.id}','vendorPhone',this.value)" /></div>
+              <div><label style="font-size:10px;color:#888;text-transform:uppercase">Order URL</label><input value="${escapeHtml(i.vendorUrl||'')}" onchange="updateMerchItemField('${i.id}','vendorUrl',this.value)" /></div>
+              <div><label style="font-size:10px;color:#888;text-transform:uppercase">Reorder qty</label><input type="number" min="0" value="${mNum(i.reorderQty)}" onchange="updateMerchItemField('${i.id}','reorderQty',this.value)" /></div>
+              <div><label style="font-size:10px;color:#888;text-transform:uppercase">Lead time (days)</label><input type="number" min="0" value="${i.leadTimeDays||''}" onchange="updateMerchItemField('${i.id}','leadTimeDays',this.value)" /></div>
+              <div style="grid-column:1/-1"><label style="font-size:10px;color:#888;text-transform:uppercase">Notes</label><input value="${escapeHtml(i.notes||'')}" onchange="updateMerchItemField('${i.id}','notes',this.value)" /></div>
+            </div>
+          </td></tr>`;
+        }).join('')}
+        </tbody>
+      </table>` : '<div style="background:#fafafa;padding:24px;text-align:center;color:#888;border-radius:6px">No items yet. Add one above.</div>'}`;
+}
+function toggleVendorRow(id) {
+  const r = document.getElementById('vrow_' + id);
+  if (r) r.style.display = (r.style.display === 'none' || !r.style.display) ? '' : 'none';
+}
+
+/* --- Sub-view: Activity Log --- */
+function renderMerchLog(b) {
+  const rows = merchRequests.slice().sort((a,b)=>b.takenAt-a.takenAt);
+  b.innerHTML = `
+    <h4 style="font-family:'JetBrains Mono',monospace;font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:#666;margin:0 0 10px">Checkout activity (${rows.length})</h4>
+    ${rows.length?`
+      <table class="report-table">
+        <thead><tr><th>When</th><th>Kit</th><th class="num">Qty</th><th>Team</th><th>Person</th><th>Event / purpose</th><th class="num">Cost</th><th>Status</th><th></th></tr></thead>
+        <tbody>${rows.map(r=>`
+          <tr style="${r.status==='voided'?'opacity:.5;text-decoration:line-through':''}">
+            <td style="font-size:11px;color:#777;white-space:nowrap">${new Date(r.takenAt).toLocaleDateString()} ${new Date(r.takenAt).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}</td>
+            <td><strong>${escapeHtml(r.kitName)}</strong> <span style="font-size:10px;color:#999">${tierLabel(r)}</span></td>
+            <td class="num">${r.qty}</td>
+            <td>${escapeHtml(r.team||'—')}</td>
+            <td>${escapeHtml(r.person||r.by||'—')}</td>
+            <td style="font-size:12px">${escapeHtml([r.eventName,r.purpose].filter(Boolean).join(' · ')||'—')}</td>
+            <td class="num">${fmt$((r.costAtTime||0).toFixed(2))}</td>
+            <td><span style="font-size:11px;font-weight:700;color:${r.status==='taken'?'var(--status-approved)':'#999'}">${r.status==='taken'?'Taken':'Voided'}</span></td>
+            <td>${r.status==='taken'?`<button class="btn ghost small" style="color:#dc2626" onclick="voidRequest('${r.id}')">Void</button>`:''}</td>
+          </tr>`).join('')}</tbody>
+      </table>` : '<div style="background:#fafafa;padding:24px;text-align:center;color:#888;border-radius:6px">No kits have been checked out yet.</div>'}`;
+}
+
+/* --- Sub-view: Reorder Report --- */
+function renderMerchReorder(b) {
+  const low = lowStockItems().slice().sort((a,b)=>(a.vendorName||'').localeCompare(b.vendorName||''));
+  let totalCost = 0;
+  const rows = low.map(i => {
+    const orderQty = mNum(i.reorderQty) || Math.max(0, mNum(i.reorderPoint)*2 - mNum(i.qtyOnHand));
+    const cost = mNum(i.unitCost) * orderQty; totalCost += cost;
+    return `<tr>
+      <td><strong>${escapeHtml(i.name)}</strong>${i.sku?`<div style="font-size:10px;color:#999">${escapeHtml(i.sku)}</div>`:''}</td>
+      <td class="num" style="color:var(--status-denied);font-weight:700">${mNum(i.qtyOnHand)}</td>
+      <td class="num">${mNum(i.reorderPoint)}</td>
+      <td class="num"><strong>${orderQty}</strong></td>
+      <td class="num">${fmt$(cost.toFixed(2))}</td>
+      <td style="font-size:12px">${escapeHtml(i.vendorName||'—')}${i.vendorSku?`<div style="font-size:10px;color:#999">SKU ${escapeHtml(i.vendorSku)}</div>`:''}</td>
+      <td style="font-size:11px">${escapeHtml([i.vendorContact,i.vendorEmail,i.vendorPhone].filter(Boolean).join('<br>')) || '<span style="color:#bbb">add in Inventory</span>'}</td>
+      <td style="font-size:12px">${i.leadTimeDays?escapeHtml(i.leadTimeDays)+'d':'—'}</td>
+    </tr>`;
+  }).join('');
+  b.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px">
+      <h4 style="font-family:'JetBrains Mono',monospace;font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:#666;margin:0">Items to reorder (${low.length}) · est. ${fmt$(totalCost.toFixed(2))}</h4>
+      ${low.length?`<button class="btn small" onclick="exportReorderCsv()">⬇ Export reorder CSV</button>`:''}
+    </div>
+    ${low.length?`
+      <table class="report-table">
+        <thead><tr><th>Item</th><th class="num">On hand</th><th class="num">Reorder pt</th><th class="num">Order qty</th><th class="num">Est. cost</th><th>Vendor</th><th>Contact</th><th class="num">Lead</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <p style="font-size:11px;color:#888;margin-top:10px">Suggested order qty = each item's reorder qty (or enough to reach 2× the reorder point). Fill in vendor details on the Inventory tab so this report is purchase-ready.</p>
+    ` : '<div style="background:#ECFDF5;border:1px solid #A7F3D0;padding:24px;text-align:center;color:#065F46;border-radius:6px">✓ Everything is above its reorder point. Nothing to order.</div>'}`;
+}
+
 /* ---------- Boot ---------- */
 (async () => {
   // Show submitter chip + prompt for name on first run
@@ -9106,8 +9827,14 @@ async function checkRecurringEvents() {
     loadEvents(),
     loadTemplates(),
     loadVendors(),
-    loadSettings()
+    loadSettings(),
+    loadMerchItems(),
+    loadMerchKits(),
+    loadMerchRequests()
   ]);
+
+  // Seed starter merch data on first run (idempotent)
+  seedMerchIfEmpty();
 
   // Auto-import CSV data if no events exist
   if (events.length === 0 && CSV_IMPORT_DATA.length > 0) {
@@ -9125,6 +9852,9 @@ async function checkRecurringEvents() {
   subscribeTemplates();
   subscribeVendors();
   subscribeSettings();
+  subscribeMerchItems();
+  subscribeMerchKits();
+  subscribeMerchRequests();
 
   // Time format toggle wiring
   const tfBtn = document.getElementById('timeFormatToggle');

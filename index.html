@@ -2131,7 +2131,9 @@ const db = firebase.firestore();
 db.enablePersistence({ synchronizeTabs: true }).catch(err => {
   console.log('Firestore persistence unavailable:', err.code);
 });
-const EVENTS_DOC = db.collection('app').doc('events');
+const EVENTS_DOC = db.collection('app').doc('events'); // legacy single-doc (kept as read-only backup after migration)
+const EVENTS_COL = db.collection('events_v2');          // one document per event (no 1MB ceiling)
+const ATTACH_COL = db.collection('attachments');        // one document per file attachment
 const TEMPLATES_DOC = db.collection('app').doc('templates');
 const VENDORS_DOC = db.collection('app').doc('vendors');
 const SETTINGS_DOC = db.collection('app').doc('settings');
@@ -2210,7 +2212,59 @@ function promptSubmitter(force) {
   toast('Submitting as ' + trimmed);
 }
 
-/* ---------- Storage (Firestore + localStorage cache) ---------- */
+/* ---------- Storage (Firestore + localStorage cache) ----------
+   v2 architecture: each event lives in its own Firestore document
+   (collection `events_v2`) so the old 1 MiB single-document ceiling —
+   the cause of the "Cloud save failed" errors — can never be hit again.
+   File attachments are stored one-per-document in `attachments` and the
+   event only keeps a lightweight reference {attId, name, type, size}.
+   Legacy data in app/events is auto-migrated on first load and then kept
+   untouched as a frozen backup. The saveEvents() API is unchanged, so
+   every existing call site works exactly as before. */
+
+const MAX_EVENT_DOC_BYTES = 900 * 1024;   // safety margin under Firestore's 1 MiB cap
+const _attDataCache = {};                 // attId -> dataUrl (in-memory, fetched on demand)
+let _lastSynced = {};                     // event id -> JSON string of last cloud-synced version
+let _eventsDirty = false;                 // unsaved local changes pending flush
+let _flushingEvents = false;
+
+function describeCloudError(e) {
+  const code = (e && e.code) || '';
+  if (code === 'permission-denied') return 'permission denied — check Firestore rules';
+  if (code === 'resource-exhausted') return 'Firestore quota exceeded';
+  if (code === 'unavailable') return 'network unavailable — will retry when back online';
+  if (code === 'invalid-argument') return 'record too large for cloud storage';
+  return code || (e && e.message) || 'unknown error';
+}
+
+function cacheEventsLocally() {
+  try { localStorage.setItem(KEY, JSON.stringify(events)); }
+  catch (e) { console.log('localStorage write failed:', e); }
+}
+
+// Move any inline base64 attachment data out of the event and into its own
+// attachments/{attId} document. Mutates the attachment entries in place to
+// lightweight refs (only after the upload succeeds, so nothing is ever lost).
+async function offloadAttachments(ev) {
+  if (!Array.isArray(ev.attachments)) return;
+  for (const a of ev.attachments) {
+    if (!a || !a.dataUrl) continue;
+    const attId = a.attId || ('att_' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36));
+    try {
+      await ATTACH_COL.doc(attId).set({
+        name: a.name || 'file', type: a.type || '', size: a.size || 0,
+        dataUrl: a.dataUrl, eventId: ev.id || '', addedAt: a.addedAt || Date.now()
+      });
+      _attDataCache[attId] = a.dataUrl;
+      a.attId = attId;
+      delete a.dataUrl; // strip heavy payload from the event doc only on success
+    } catch (e) {
+      console.error('Attachment upload failed (kept inline):', e);
+      toast('⚠️ Could not upload "' + (a.name || 'file') + '" to cloud: ' + describeCloudError(e));
+    }
+  }
+}
+
 async function loadEvents() {
   // 1) Show cached data immediately so UI isn't blank if offline/slow
   try {
@@ -2222,50 +2276,132 @@ async function loadEvents() {
 
   // 2) Fetch latest from Firestore (one-shot, before subscribing)
   try {
-    const snap = await EVENTS_DOC.get();
-    if (snap.exists && Array.isArray(snap.data().events)) {
-      events = snap.data().events;
-      localStorage.setItem(KEY, JSON.stringify(events));
+    const colSnap = await EVENTS_COL.get();
+    if (!colSnap.empty) {
+      events = colSnap.docs.map(d => d.data());
+    } else {
+      // First run on v2: migrate from the legacy single document
+      const legacy = await EVENTS_DOC.get();
+      if (legacy.exists && Array.isArray(legacy.data().events) && legacy.data().events.length) {
+        events = legacy.data().events;
+        console.log('Migrating ' + events.length + ' events from legacy doc to events_v2…');
+        for (const ev of events) { if (!ev.id) ev.id = uid(); await offloadAttachments(ev); }
+        let batch = db.batch(), n = 0;
+        for (const ev of events) {
+          batch.set(EVENTS_COL.doc(ev.id), ev);
+          if (++n % 400 === 0) { await batch.commit(); batch = db.batch(); }
+        }
+        await batch.commit();
+        await EVENTS_DOC.set({ migratedTo: 'events_v2', migratedAt: Date.now() }, { merge: true });
+        console.log('Migration complete.');
+        toast('✓ Cloud storage upgraded — saves are no longer size-limited');
+      }
     }
+    _lastSynced = {};
+    events.forEach(ev => { if (ev.id) _lastSynced[ev.id] = JSON.stringify(ev); });
+    cacheEventsLocally();
   } catch (e) {
     console.log('Firestore initial load failed (using cache):', e);
   }
 }
 
-// Real-time subscription: when any device writes, all other devices update
+// Real-time subscription: when any device writes, all other devices update.
+// Per-event granularity — remote edits merge in without clobbering the list.
 function subscribeEvents() {
-  EVENTS_DOC.onSnapshot(snap => {
-    if (_suppressNextRemote) { _suppressNextRemote = false; return; }
-    if (!snap.exists) return;
-    const data = snap.data();
-    if (!Array.isArray(data.events)) return;
-    events = data.events;
-    localStorage.setItem(KEY, JSON.stringify(events));
-    if (typeof render === 'function') render();
+  EVENTS_COL.onSnapshot(snap => {
+    if (snap.metadata.hasPendingWrites) return; // ignore echo of our own local writes
+    let changed = false;
+    snap.docChanges().forEach(ch => {
+      const id = ch.doc.id;
+      if (ch.type === 'removed') {
+        const before = events.length;
+        events = events.filter(x => x.id !== id);
+        delete _lastSynced[id];
+        if (events.length !== before) changed = true;
+        return;
+      }
+      const data = ch.doc.data();
+      const json = JSON.stringify(data);
+      if (_lastSynced[id] === json) return; // already in sync
+      const i = events.findIndex(x => x.id === id);
+      if (i >= 0) events[i] = data; else events.push(data);
+      _lastSynced[id] = json;
+      changed = true;
+    });
+    if (changed) {
+      cacheEventsLocally();
+      if (typeof render === 'function') render();
+    }
   }, err => {
     console.log('Firestore subscription error:', err);
   });
 }
 
+// Diff local events against the last synced state and write only what changed.
+async function _flushEvents() {
+  if (_flushingEvents) return;        // a flush is already running; dirty flag re-queues
+  _flushingEvents = true;
+  try {
+    while (_eventsDirty) {
+      _eventsDirty = false;
+      const currentIds = new Set();
+      const toWrite = [], oversized = [];
+      for (const ev of events) {
+        if (!ev.id) ev.id = uid();
+        currentIds.add(ev.id);
+        await offloadAttachments(ev);
+        const json = JSON.stringify(ev);
+        if (_lastSynced[ev.id] === json) continue;
+        if (json.length > MAX_EVENT_DOC_BYTES) { oversized.push(ev); continue; }
+        toWrite.push(ev);
+      }
+      const toDelete = Object.keys(_lastSynced).filter(id => !currentIds.has(id));
+      if (oversized.length) {
+        toast('⚠️ "' + (oversized[0].name || 'An event') + '" is too large to cloud-save — try removing attachments from it');
+      }
+      if (!toWrite.length && !toDelete.length) continue;
+      let batch = db.batch(), n = 0;
+      for (const ev of toWrite) {
+        batch.set(EVENTS_COL.doc(ev.id), JSON.parse(JSON.stringify(ev))); // strip undefined values
+        if (++n % 400 === 0) { await batch.commit(); batch = db.batch(); n = 0; }
+      }
+      for (const id of toDelete) {
+        batch.delete(EVENTS_COL.doc(id));
+        if (++n % 400 === 0) { await batch.commit(); batch = db.batch(); n = 0; }
+      }
+      await batch.commit();
+      toWrite.forEach(ev => { _lastSynced[ev.id] = JSON.stringify(ev); });
+      toDelete.forEach(id => { delete _lastSynced[id]; });
+    }
+  } catch (e) {
+    _eventsDirty = true; // keep dirty so a later flush retries
+    console.error('Firestore save failed:', e);
+    toast('⚠️ Cloud save failed (' + describeCloudError(e) + ') — changes saved on this device');
+  } finally {
+    _flushingEvents = false;
+  }
+}
+
+// Retry any unsaved changes automatically when the connection comes back
+window.addEventListener('online', () => { if (_eventsDirty) _flushEvents(); });
+// If the tab is closed/hidden while a debounced save is pending, flush now —
+// Firestore offline persistence queues it locally so it syncs on next launch.
+window.addEventListener('pagehide', () => {
+  if (_eventsDirty) { if (_saveDebounce) clearTimeout(_saveDebounce); _flushEvents(); }
+});
+
 async function saveEvents() {
   // Always update localStorage immediately (instant, offline-safe)
-  try { localStorage.setItem(KEY, JSON.stringify(events)); }
-  catch (e) { console.log('localStorage write failed:', e); }
+  cacheEventsLocally();
+  _eventsDirty = true;
 
   // Debounce Firestore writes slightly to coalesce rapid edits
   if (_saveDebounce) clearTimeout(_saveDebounce);
   return new Promise(resolve => {
     _saveDebounce = setTimeout(async () => {
-      try {
-        _suppressNextRemote = true;
-        await EVENTS_DOC.set({ events, updatedAt: Date.now() });
-      } catch (e) {
-        _suppressNextRemote = false;
-        console.error('Firestore save failed:', e);
-        toast('⚠️ Cloud save failed - changes saved locally only');
-      }
+      await _flushEvents();
       resolve();
-    }, 150);
+    }, 250);
   });
 }
 
@@ -2284,7 +2420,7 @@ async function loadTemplates() {
 async function saveTemplates() {
   try { localStorage.setItem(TEMPLATES_KEY, JSON.stringify(templates)); } catch (e) {}
   try { await TEMPLATES_DOC.set({ templates, updatedAt: Date.now() }); }
-  catch (e) { console.log('Template Firestore save failed:', e); }
+  catch (e) { console.error('Template Firestore save failed:', e); toast('⚠️ Template cloud save failed (' + describeCloudError(e) + ')'); }
 }
 function subscribeTemplates() {
   TEMPLATES_DOC.onSnapshot(snap => {
@@ -2313,7 +2449,7 @@ async function loadVendors() {
 async function saveVendors() {
   try { localStorage.setItem(VENDORS_KEY, JSON.stringify(vendors)); } catch (e) {}
   try { await VENDORS_DOC.set({ vendors, updatedAt: Date.now() }); }
-  catch (e) { console.log('Vendors Firestore save failed:', e); }
+  catch (e) { console.error('Vendors Firestore save failed:', e); toast('⚠️ Vendor cloud save failed (' + describeCloudError(e) + ')'); }
 }
 function subscribeVendors() {
   VENDORS_DOC.onSnapshot(snap => {
@@ -2343,7 +2479,7 @@ async function loadSettings() {
 async function saveSettings() {
   try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(appSettings)); } catch (e) {}
   try { await SETTINGS_DOC.set(Object.assign({ updatedAt: Date.now() }, appSettings)); }
-  catch (e) { console.log('Settings Firestore save failed:', e); }
+  catch (e) { console.error('Settings Firestore save failed:', e); toast('⚠️ Settings cloud save failed (' + describeCloudError(e) + ')'); }
 }
 function subscribeSettings() {
   SETTINGS_DOC.onSnapshot(snap => {
@@ -2369,7 +2505,7 @@ async function loadMerchItems() {
 async function saveMerchItems() {
   try { localStorage.setItem(MERCH_ITEMS_KEY, JSON.stringify(merchItems)); } catch (e) {}
   try { await MERCH_ITEMS_DOC.set({ items: merchItems, updatedAt: Date.now() }); }
-  catch (e) { console.log('Merch items Firestore save failed:', e); }
+  catch (e) { console.error('Merch items Firestore save failed:', e); toast('⚠️ Merch inventory cloud save failed (' + describeCloudError(e) + ')'); }
 }
 function subscribeMerchItems() {
   MERCH_ITEMS_DOC.onSnapshot(snap => {
@@ -2397,7 +2533,7 @@ async function loadMerchKits() {
 async function saveMerchKits() {
   try { localStorage.setItem(MERCH_KITS_KEY, JSON.stringify(merchKits)); } catch (e) {}
   try { await MERCH_KITS_DOC.set({ kits: merchKits, updatedAt: Date.now() }); }
-  catch (e) { console.log('Merch kits Firestore save failed:', e); }
+  catch (e) { console.error('Merch kits Firestore save failed:', e); toast('⚠️ Merch kits cloud save failed (' + describeCloudError(e) + ')'); }
 }
 function subscribeMerchKits() {
   MERCH_KITS_DOC.onSnapshot(snap => {
@@ -2425,7 +2561,7 @@ async function loadMerchRequests() {
 async function saveMerchRequests() {
   try { localStorage.setItem(MERCH_REQUESTS_KEY, JSON.stringify(merchRequests)); } catch (e) {}
   try { await MERCH_REQUESTS_DOC.set({ requests: merchRequests, updatedAt: Date.now() }); }
-  catch (e) { console.log('Merch requests Firestore save failed:', e); }
+  catch (e) { console.error('Merch requests Firestore save failed:', e); toast('⚠️ Merch request cloud save failed (' + describeCloudError(e) + ')'); }
 }
 function subscribeMerchRequests() {
   MERCH_REQUESTS_DOC.onSnapshot(snap => {
@@ -2608,12 +2744,36 @@ async function handleDetailAttachments(eventId, files) {
   toast(`Added ${added.length} file(s)`);
   openDetail(eventId);
 }
+// Fetch an offloaded attachment's data from the cloud, cache it, and re-render
+async function openAttachment(eventId, idx) {
+  const ev = events.find(x => x.id === eventId);
+  const a = ev && ev.attachments && ev.attachments[idx];
+  if (!a) return;
+  if (!a.attId) { toast('File data unavailable'); return; }
+  if (!_attDataCache[a.attId]) {
+    toast('Loading "' + (a.name || 'file') + '"…');
+    try {
+      const snap = await ATTACH_COL.doc(a.attId).get();
+      if (!snap.exists || !snap.data().dataUrl) { toast('⚠️ File not found in cloud storage'); return; }
+      _attDataCache[a.attId] = snap.data().dataUrl;
+    } catch (e) {
+      toast('⚠️ Could not load file: ' + describeCloudError(e));
+      return;
+    }
+  }
+  openDetail(eventId); // re-render: link/thumbnail now uses the cached data
+}
+
 async function removeAttachment(eventId, idx) {
   const ev = events.find(x => x.id === eventId);
   if (!ev || !ev.attachments) return;
   const removed = ev.attachments[idx];
   if (!confirm(`Remove "${removed?.name || 'file'}"?`)) return;
   ev.attachments.splice(idx, 1);
+  if (removed && removed.attId) {
+    ATTACH_COL.doc(removed.attId).delete().catch(e => console.log('Attachment doc delete failed:', e));
+    delete _attDataCache[removed.attId];
+  }
   ev.log = ev.log || [];
   ev.log.push({ action: 'Removed attachment', by: logBy(), note: removed?.name || '', at: Date.now() });
   await saveEvents();
@@ -4506,17 +4666,20 @@ function openDetail(id) {
       <div style="margin-top:10px"><div class="lbl" style="font-family:'JetBrains Mono',monospace;font-size:10px;text-transform:uppercase;color:#888">Notes</div><div>${escapeHtml(e.notes||'—')}</div></div>
     </fieldset>` : '';
 
-  // Attachments rendering
+  // Attachments rendering (data may be inline, cached, or fetched on demand)
   const atts = (e.attachments || []);
   const attHtml = atts.length ? atts.map((a, i) => {
     const isImg = (a.type || '').startsWith('image/');
     const sizeKb = a.size ? ` · ${(a.size/1024).toFixed(0)} KB` : '';
+    const dataUrl = a.dataUrl || (a.attId && _attDataCache[a.attId]) || '';
     return `
       <div class="attachment-row">
-        ${isImg && a.dataUrl ? `<img class="att-thumb" src="${a.dataUrl}" alt="" />` : `<div class="att-icon">📎</div>`}
+        ${isImg && dataUrl ? `<img class="att-thumb" src="${dataUrl}" alt="" />` : `<div class="att-icon">${isImg ? '🖼️' : '📎'}</div>`}
         <div class="att-meta">
-          <a href="${a.dataUrl}" download="${escapeHtml(a.name)}" target="_blank" rel="noopener">${escapeHtml(a.name)}</a>
-          <div class="att-sub">${escapeHtml(a.type || 'file')}${sizeKb}</div>
+          ${dataUrl
+            ? `<a href="${dataUrl}" download="${escapeHtml(a.name)}" target="_blank" rel="noopener">${escapeHtml(a.name)}</a>`
+            : `<a href="#" onclick="openAttachment('${e.id}', ${i}); return false;">${escapeHtml(a.name)}</a>`}
+          <div class="att-sub">${escapeHtml(a.type || 'file')}${sizeKb}${dataUrl ? '' : ' · click to load'}</div>
         </div>
         ${role === 'coordinator' ? `<button class="btn ghost small" onclick="removeAttachment('${e.id}', ${i})">Remove</button>` : ''}
       </div>`;

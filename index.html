@@ -2971,7 +2971,9 @@ function renderList() {
     } else if (activeFilter === 'all') {
       filtered = events.filter(e => !isArchived(e));
     } else {
-      filtered = events.filter(e => e.status === activeFilter && !isArchived(e));
+      // Status filters (Approved/Pending/Denied…) show ALL events with that
+      // status, including past-dated ones — only "All" hides archived items.
+      filtered = events.filter(e => e.status === activeFilter);
     }
   } else {
     filtered = events.filter(e => activeFilter === 'all' ? true : e.status === activeFilter);
@@ -5272,7 +5274,7 @@ function getCurrentlyFilteredEvents() {
   if (role === 'coordinator') {
     if (activeFilter === 'archive') filtered = events.filter(isArchived);
     else if (activeFilter === 'all') filtered = events.filter(e => !isArchived(e));
-    else filtered = events.filter(e => e.status === activeFilter && !isArchived(e));
+    else filtered = events.filter(e => e.status === activeFilter); // match renderList: status filters include past-dated
   } else {
     filtered = events.filter(e => activeFilter === 'all' ? true : e.status === activeFilter);
   }

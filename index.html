@@ -263,6 +263,42 @@
     margin-right: auto;
     letter-spacing: 0.02em;
   }
+
+  .date-filter {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    padding: 4px 10px;
+    border: 1px solid var(--pw-blue);
+    border-radius: 8px;
+    background: var(--pw-blue-soft);
+  }
+  .date-filter .df-label {
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--pw-blue-dark);
+    white-space: nowrap;
+  }
+  .date-filter .df-dash { color: #888; }
+  .date-filter .df-input {
+    font-size: 12px;
+    padding: 5px 7px;
+    border: 1px solid #CBD5E1;
+    border-radius: 6px;
+    background: var(--pw-white);
+    color: var(--pw-dark-gray);
+  }
+  .date-filter .df-input:focus {
+    outline: none;
+    border-color: var(--pw-blue);
+    box-shadow: 0 0 0 2px var(--pw-blue-medium);
+  }
+  .date-filter.active {
+    border-color: var(--pw-yellow);
+    background: var(--pw-yellow-soft);
+  }
+  .date-filter.active .df-label { color: var(--pw-dark-gray); }
   
   .filter-pill {
     font-family: 'JetBrains Mono', monospace;
@@ -1862,6 +1898,13 @@
   <div class="toolbar" id="listToolbar">
     <h2 id="viewTitle">Event Coordinator Workspace</h2>
     <div id="filters"></div>
+    <div class="date-filter" id="dateFilter" title="Filter events by date">
+      <span class="df-label">📅 Date:</span>
+      <input type="date" id="dateFrom" class="df-input" aria-label="From date" title="From date" />
+      <span class="df-dash">–</span>
+      <input type="date" id="dateTo" class="df-input" aria-label="To date" title="To date" />
+      <button class="btn ghost small" id="dateFilterClear" title="Clear date filter" style="display:none">✕</button>
+    </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap">
       <button class="btn ghost small" id="exportAllIcs" title="Download all approved/executing events as one .ics file">📅 Bulk .ics</button>
       <button class="btn ghost small" id="exportXlsxBtn" title="Export current view to Excel">📊 Excel</button>
@@ -2669,7 +2712,7 @@ function effectiveSpend(e) {
 function effectiveAttendance(e) {
   return safeNum(e?.actualAttendance) || safeNum(e?.attendance);
 }
-const isArchived = e => e.status === 'completed' || (e.date && new Date(e.date + 'T23:59') < new Date());
+const isArchived = e => e.status === 'completed' || e.status === 'denied' || (e.date && new Date(e.date + 'T23:59') < new Date());
 function labelizePayment(p) {
   return ({
     not_requested: 'Not Requested',
@@ -2949,6 +2992,19 @@ function renderFilters() {
   });
 }
 
+// ----- Date range filter (list view) -----
+let dateFrom = '';
+let dateTo = '';
+function applyDateFilter(arr) {
+  if (!dateFrom && !dateTo) return arr;
+  return arr.filter(e => {
+    if (!e.date) return false;               // undated events can't match a date range
+    if (dateFrom && e.date < dateFrom) return false;
+    if (dateTo && e.date > dateTo) return false;
+    return true;
+  });
+}
+
 function eventMatchesSearch(e, q) {
   if (!q) return true;
   const needle = q.toLowerCase();
@@ -2980,12 +3036,22 @@ function renderList() {
   }
   // Apply global search
   if (globalSearchQuery) filtered = filtered.filter(e => eventMatchesSearch(e, globalSearchQuery));
+  // Apply date range filter
+  filtered = applyDateFilter(filtered);
 
   const list = filtered.sort((a,b)=> new Date(a.date||'9999') - new Date(b.date||'9999'));
 
   const c = document.getElementById('content');
   if (!list.length) {
-    c.innerHTML = `<div class="empty"><h3>${globalSearchQuery ? 'No matches' : 'Nothing here yet'}</h3><p>${globalSearchQuery ? `No events match "${escapeHtml(globalSearchQuery)}". Clear the search bar or try different keywords.` : 'No events match this view yet.'}</p>${globalSearchQuery ? `<button class="btn" onclick="clearGlobalSearch()">Clear search</button>` : ''}</div>`;
+    const dateActive = !!(dateFrom || dateTo);
+    if (globalSearchQuery) {
+      c.innerHTML = `<div class="empty"><h3>No matches</h3><p>No events match "${escapeHtml(globalSearchQuery)}". Clear the search bar or try different keywords.</p><button class="btn" onclick="clearGlobalSearch()">Clear search</button></div>`;
+    } else if (dateActive) {
+      const rangeLabel = `${dateFrom || 'any'} → ${dateTo || 'any'}`;
+      c.innerHTML = `<div class="empty"><h3>No events in this date range</h3><p>No events fall between ${escapeHtml(rangeLabel)}. Adjust or clear the date filter.</p><button class="btn" onclick="clearDateFilter()">Clear date filter</button></div>`;
+    } else {
+      c.innerHTML = `<div class="empty"><h3>Nothing here yet</h3><p>No events match this view yet.</p></div>`;
+    }
     return;
   }
   c.innerHTML = `${globalSearchQuery ? `<div style="margin-bottom:14px;font-size:13px;color:#666">Showing <strong>${list.length}</strong> match${list.length===1?'':'es'} for "<strong>${escapeHtml(globalSearchQuery)}</strong>" · <a href="#" onclick="event.preventDefault();clearGlobalSearch()" style="color:var(--pw-yellow-hover);font-weight:700">clear</a></div>` : ''}<div class="grid">${list.map(cardHtml).join('')}</div>`;
@@ -2998,6 +3064,20 @@ function clearGlobalSearch() {
   globalSearchQuery = '';
   const inp = document.getElementById('globalSearch');
   if (inp) inp.value = '';
+  render();
+}
+
+function clearDateFilter() {
+  dateFrom = '';
+  dateTo = '';
+  const f = document.getElementById('dateFrom');
+  const t = document.getElementById('dateTo');
+  const wrap = document.getElementById('dateFilter');
+  const clr = document.getElementById('dateFilterClear');
+  if (f) f.value = '';
+  if (t) t.value = '';
+  if (wrap) wrap.classList.remove('active');
+  if (clr) clr.style.display = 'none';
   render();
 }
 
@@ -5279,6 +5359,7 @@ function getCurrentlyFilteredEvents() {
     filtered = events.filter(e => activeFilter === 'all' ? true : e.status === activeFilter);
   }
   if (globalSearchQuery) filtered = filtered.filter(e => eventMatchesSearch(e, globalSearchQuery));
+  filtered = applyDateFilter(filtered);
   return filtered.sort((a,b)=> new Date(a.date||'9999') - new Date(b.date||'9999'));
 }
 
@@ -10052,6 +10133,28 @@ function renderMerchReorder(b) {
       if (ev.key === 'Escape') { ev.target.value = ''; globalSearchQuery = ''; ev.target.blur(); render(); }
     });
   }
+
+  // Date range filter wiring
+  const dfFrom = document.getElementById('dateFrom');
+  const dfTo = document.getElementById('dateTo');
+  const dfClear = document.getElementById('dateFilterClear');
+  const dfWrap = document.getElementById('dateFilter');
+  function syncDateFilterUI() {
+    const active = !!(dateFrom || dateTo);
+    if (dfWrap) dfWrap.classList.toggle('active', active);
+    if (dfClear) dfClear.style.display = active ? '' : 'none';
+  }
+  function applyDateInputs() {
+    dateFrom = dfFrom ? dfFrom.value : '';
+    dateTo = dfTo ? dfTo.value : '';
+    syncDateFilterUI();
+    // If filtering from a non-list view, jump to the list so results are visible
+    if ((dateFrom || dateTo) && activeView !== 'list') setView('list');
+    else render();
+  }
+  if (dfFrom) dfFrom.addEventListener('change', applyDateInputs);
+  if (dfTo) dfTo.addEventListener('change', applyDateInputs);
+  if (dfClear) dfClear.addEventListener('click', clearDateFilter);
 
   // Ask new users for their name on first load (after first paint).
   setTimeout(() => promptSubmitter(false), 350);
